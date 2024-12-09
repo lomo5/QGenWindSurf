@@ -1,0 +1,22 @@
+appId: com.qgenwindsurf.app
+productName: QGenWindSurf
+directories:
+  output: release
+files:
+  - dist/**/*
+  - main.js
+  - src/preload.js
+  - package.json
+win:
+  target:
+    - target: nsis
+      arch:
+        - x64
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+  shortcutName: QGenWindSurf
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
