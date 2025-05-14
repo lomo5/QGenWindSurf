@@ -33,8 +33,17 @@ app.use((req, res, next) => {
 const ANYTHING_LLM_BASE_URL = 'http://localhost:3001'
 const DEFAULT_WORKSPACE_SLUG = 'default'  // 默认工作区
 
+// 根据题目数量计算超时时间（单位：毫秒）
+function calculateTimeout(questionCount) {
+    // 基础超时时间：10分钟
+    const baseTimeout = 10 * 60 * 1000
+    // 每个题目额外增加2分钟
+    const timePerQuestion = 2 * 60 * 1000
+    return baseTimeout + (questionCount * timePerQuestion)
+}
+
 // 获取API客户端实例
-async function getApiClient() {
+async function getApiClient(options = {}) {
     const apiKey = await db.getConfig('anythingllm_api_key')
     if (!apiKey) {
         throw new Error('AnythingLLM API Key not configured')
@@ -45,7 +54,8 @@ async function getApiClient() {
         headers: {
             'Authorization': `Bearer ${apiKey}`,
             'Accept': 'application/json'
-        }
+        },
+        timeout: options.timeout || 600000  // 默认10分钟超时
     })
 }
 
@@ -117,14 +127,13 @@ async function createWorkspaceIfNotExists(apiClient, workspaceSlug = DEFAULT_WOR
 app.post('/generate-questions', async (req, res) => {
     try {
         console.log('Generating questions with:', req.body)
-        
-        // 确保工作区存在
-        const workspace = await getWorkspaceInfo()
-        if (!workspace) {
-            throw new Error('Workspace not found or not accessible')
-        }
+        const { count } = req.body
 
-        const apiClient = await getApiClient()
+        // 根据题目数量设置超时时间
+        const timeout = calculateTimeout(count)
+        console.log(`Set timeout to ${timeout}ms for generating ${count} questions`)
+        
+        const apiClient = await getApiClient({ timeout })
         const response = await apiClient.post(
             `/api/v1/workspace/${DEFAULT_WORKSPACE_SLUG}/chat`,
             {
@@ -424,101 +433,134 @@ app.get('/test', (req, res) => {
     res.json({ message: 'Server is running' })
 })
 
-// 代理文件上传请求
+// 文件上传路由
 app.post('/api/v1/document/upload', async (req, res) => {
-    let tempFilePath = null
+    let tempFilePath = null;
+    let utf8FilePath = null;
+    
     try {
         if (!req.files || !req.files.file) {
-            return res.status(400).json({ error: 'No file uploaded' })
+            return res.status(400).json({ error: 'No file uploaded' });
         }
 
-        const uploadedFile = req.files.file
-        console.log('Received file:', {
-            name: uploadedFile.name,
-            size: uploadedFile.size,
-            mimetype: uploadedFile.mimetype
-        })
+        const file = req.files.file;
+        
+        // 处理文件名编码
+        let originalFileName = file.name;
+        
+        // 如果文件名是 Buffer，先转换为字符串
+        if (Buffer.isBuffer(originalFileName)) {
+            originalFileName = originalFileName.toString('utf8');
+        }
+        
+        // 检测文件名的编码并转换
+        const fileNameBuffer = Buffer.from(originalFileName, 'binary');
+        const detectedNameEncoding = chardet.detect(fileNameBuffer);
+        console.log('Detected filename encoding:', detectedNameEncoding);
+        
+        // 转换文件名为 UTF-8
+        const decodedFileName = iconv.decode(fileNameBuffer, detectedNameEncoding || 'utf8');
+        
+        console.log('File name conversion:', {
+            original: originalFileName,
+            detected: detectedNameEncoding,
+            decoded: decodedFileName
+        });
 
         // 创建临时目录（如果不存在）
-        const tempDir = path.join(__dirname, 'temp')
+        const tempDir = path.join(__dirname, 'temp');
         if (!fs.existsSync(tempDir)) {
-            fs.mkdirSync(tempDir)
+            fs.mkdirSync(tempDir);
         }
 
-        // 使用原始文件名创建临时文件
-        const originalName = decodeURIComponent(uploadedFile.name)
-        tempFilePath = path.join(tempDir, originalName)
+        // 生成安全的临时文件路径
+        const timestamp = Date.now();
+        tempFilePath = path.join(tempDir, `upload_${timestamp}_${decodedFileName}`);
         
-        // 如果临时目录中已存在同名文件，先删除
-        if (fs.existsSync(tempFilePath)) {
-            fs.unlinkSync(tempFilePath)
-        }
-        
-        // 将上传的文件保存到临时文件
-        await uploadedFile.mv(tempFilePath)
-        
+        // 移动上传的文件到临时目录
+        await file.mv(tempFilePath);
         console.log('File saved to temp location:', {
-            originalName,
+            originalName: decodedFileName,
             tempPath: tempFilePath
-        })
+        });
 
-        const apiClient = await getApiClient()
+        // 检测文件内容编码
+        const detectedContentEncoding = chardet.detectFileSync(tempFilePath);
+        console.log('Detected file content encoding:', detectedContentEncoding);
+
+        // 读取文件内容并转换编码
+        const fileContent = fs.readFileSync(tempFilePath);
+        const convertedContent = iconv.decode(fileContent, detectedContentEncoding || 'utf8');
+
+        // 创建新的临时文件（UTF-8编码）
+        utf8FilePath = tempFilePath + '.utf8';
+        fs.writeFileSync(utf8FilePath, convertedContent, 'utf8');
+
+        // 准备发送到 AnythingLLM 的表单数据
+        const formData = new FormData();
         
-        // 创建新的 FormData 来转发文件
-        const formData = new FormData()
+        // 确保文件名是正确的 UTF-8 编码
+        const finalFileName = Buffer.from(decodedFileName, 'utf8').toString('utf8');
         
-        // 使用文件流来上传文件
-        const fileStream = fs.createReadStream(tempFilePath)
-        formData.append('file', fileStream, {
-            filename: encodeURIComponent(originalName),
-            contentType: uploadedFile.mimetype || 'text/plain'
-        })
+        formData.append('file', fs.createReadStream(utf8FilePath), {
+            filename: finalFileName,
+            contentType: file.mimetype
+        });
 
         console.log('Forwarding file to AnythingLLM:', {
-            filename: originalName,
-            mimetype: uploadedFile.mimetype
-        })
+            filename: finalFileName,
+            mimetype: file.mimetype
+        });
 
+        // 发送文件到 AnythingLLM
+        const apiClient = await getApiClient();
         const response = await apiClient.post('/api/v1/document/upload', formData, {
-            headers: formData.getHeaders(),
+            headers: {
+                ...formData.getHeaders(),
+                'Content-Type': 'multipart/form-data'
+            },
             maxContentLength: Infinity,
             maxBodyLength: Infinity
-        })
+        });
 
-        console.log('AnythingLLM response:', response.data)
+        console.log('AnythingLLM upload response:', response.data);
 
-        if (!response.data.success) {
-            throw new Error('Upload failed: ' + JSON.stringify(response.data))
+        // 清理临时文件
+        if (tempFilePath && fs.existsSync(tempFilePath)) {
+            fs.unlinkSync(tempFilePath);
         }
+        if (utf8FilePath && fs.existsSync(utf8FilePath)) {
+            fs.unlinkSync(utf8FilePath);
+        }
+        console.log('Temporary files cleaned up');
 
-        res.json(response.data)
+        res.json(response.data);
     } catch (error) {
         console.error('Error uploading file:', {
             message: error.message,
             response: error.response?.data,
             status: error.response?.status
-        })
-        
+        });
+
+        // 清理临时文件
+        try {
+            if (tempFilePath && fs.existsSync(tempFilePath)) {
+                fs.unlinkSync(tempFilePath);
+            }
+            if (utf8FilePath && fs.existsSync(utf8FilePath)) {
+                fs.unlinkSync(utf8FilePath);
+            }
+        } catch (cleanupError) {
+            console.error('Error cleaning up temp files:', cleanupError);
+        }
+
         res.status(500).json({
             error: 'Failed to upload file',
             message: error.message,
-            details: {
-                response: error.response?.data,
-                status: error.response?.status
-            }
-        })
-    } finally {
-        // 清理临时文件
-        if (tempFilePath && fs.existsSync(tempFilePath)) {
-            try {
-                fs.unlinkSync(tempFilePath)
-                console.log('Temporary file cleaned up:', tempFilePath)
-            } catch (error) {
-                console.error('Error cleaning up temporary file:', error)
-            }
-        }
+            details: error.response?.data
+        });
     }
-})
+});
 
 // 代理获取文档列表请求
 app.get('/api/v1/documents', async (req, res) => {
@@ -677,12 +719,27 @@ app.post('/api/v1/workspace/:workspaceSlug/chat', async (req, res) => {
         const response = await apiClient.post(`/api/v1/workspace/${workspaceSlug}/chat`, {
             message,
             mode
+        }, {
+            timeout: 600000  // 10分钟超时
         })
 
         console.log('Chat response:', response.data)
         res.json(response.data)
     } catch (error) {
-        console.error('Error in workspace chat:', error.response?.data || error)
+        console.error('Error in workspace chat:', {
+            error: error.message,
+            response: error.response?.data,
+            config: error.config
+        })
+        
+        // 处理特定类型的错误
+        if (error.code === 'ECONNABORTED') {
+            return res.status(504).json({
+                error: '生成题目超时',
+                message: '请稍后重试或减少文本内容'
+            })
+        }
+        
         res.status(error.response?.status || 500).json({
             error: error.message,
             details: error.response?.data

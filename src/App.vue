@@ -82,16 +82,16 @@
             <el-form label-position="top">
               <el-form-item label="AI模型">
                 <el-select v-model="selectedModel" style="width: 100%">
-                  <el-option label="Llama2" value="llama2" />
-                  <el-option label="Qwen" value="qwen" />
-                  <el-option label="ChatGLM3" value="chatglm3" />
+                  <el-option label="Llama3.1:8b" value="llama3" />
+                  <el-option label="Gemma2:9b" value="gemma2" />
+                  <el-option label="Qwen2:7b" value="qwen2" />
                 </el-select>
               </el-form-item>
               <el-form-item label="题目类型">
                 <el-select v-model="questionType" style="width: 100%">
                   <el-option label="单选题" value="single" />
                   <el-option label="多选题" value="multiple" />
-                  <el-option label="判断题" value="judge" />
+                  <el-option label="判断题" value="judgment" />
                 </el-select>
               </el-form-item>
               <el-form-item label="生成数量">
@@ -310,6 +310,7 @@ import { ref, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowDown, UploadFilled } from '@element-plus/icons-vue'
 import api from './utils/api'
+import { utils as xlsxUtils, write as xlsxWrite } from 'xlsx'
 
 // 状态变量
 const apikeyDialogVisible = ref(false)
@@ -324,7 +325,7 @@ const workspaceFiles = ref([])
 const loading = ref(false)
 const isLoading = ref(false)
 const generatingQuestions = ref(false)
-const selectedModel = ref('gpt-3.5-turbo')
+const selectedModel = ref('Llama3.1:8b')
 const questionType = ref('single')
 const selectedProfession = ref(null)
 const fileList = ref([])
@@ -341,19 +342,36 @@ const pageSize = ref(10)
 const embeddedDocs = ref(new Set())
 const createWorkspaceDialogVisible = ref(false)
 
-// 选项数据
-const modelOptions = [
-  { label: 'GPT-3.5', value: 'gpt-3.5-turbo' },
-  { label: 'GPT-4', value: 'gpt-4' }
-]
-
-const questionTypeOptions = [
-  { label: '单选题', value: 'single' },
-  { label: '多选题', value: 'multiple' },
-  { label: '判断题', value: 'judge' },
-  { label: '填空题', value: 'blank' },
-  { label: '简答题', value: 'short' }
-]
+// 题型提示模板
+const questionPrompts = {
+  'single': {
+    type: '单选题',
+    description: '每个题目只有一个正确答案',
+    format: `题目格式要求：
+1. 题干要明确、清晰，避免模棱两可
+2. 四个选项内容要简洁，具有明显区分度
+3. 答案必须是 A、B、C、D 中的一个字母
+4. 确保只有一个正确答案`,
+  },
+  'multiple': {
+    type: '多选题',
+    description: '每个题目可以有多个正确答案',
+    format: `题目格式要求：
+1. 题干要明确、清晰，避免模棱两可
+2. 四个选项内容要简洁，具有明显区分度
+3. 答案必须是 A、B、C、D 的组合，如 "ABC"
+4. 至少有两个正确答案，最多四个`,
+  },
+  'judgment': {
+    type: '判断题',
+    description: '判断题只有对错两个选项',
+    format: `题目格式要求：
+1. 题干必须是一个明确的陈述句
+2. 只能有两个选项：A表示正确，B表示错误
+3. 答案必须是 A 或 B
+4. 避免使用模棱两可的表述`,
+  }
+}
 
 // 命令处理
 const handleCommand = (command) => {
@@ -535,7 +553,13 @@ const embedDocument = async (file) => {
   try {
     console.log('Embedding file:', file)
     await api.embedDocument(selectedWorkspace.value, file.id)
-    await loadWorkspaceData() // 重新加载工作区数据以更新状态
+    
+    // 立即更新本地状态
+    const docPath = `custom-documents/${file.name}`
+    embeddedDocs.value.add(docPath)
+    
+    // 重新加载工作区数据以确保状态同步
+    await loadWorkspaceData()
     ElMessage.success('文档加载成功')
   } catch (error) {
     console.error('Error embedding document:', error)
@@ -556,7 +580,7 @@ const loadWorkspaceData = async () => {
     if (workspace.documents) {
       embeddedDocs.value.clear()
       workspace.documents.forEach(doc => {
-        const docPath = doc.docpath || doc.path
+        const docPath = doc.docpath || doc.path || `custom-documents/${doc.name}`
         if (docPath) {
           embeddedDocs.value.add(docPath)
         }
@@ -569,9 +593,130 @@ const loadWorkspaceData = async () => {
   }
 }
 
+const unembedDocument = async (file) => {
+  if (!selectedWorkspace.value) {
+    ElMessage.error('请先选择工作区')
+    return
+  }
+
+  file.loading = true
+  try {
+    const docPath = `custom-documents/${file.name}`
+    await api.unembedDocument(selectedWorkspace.value, docPath)
+    
+    // 立即更新本地状态
+    embeddedDocs.value.delete(docPath)
+    
+    // 重新加载工作区数据以确保状态同步
+    await loadWorkspaceData()
+    ElMessage.success('文档卸载成功')
+  } catch (error) {
+    console.error('Error unembedding document:', error)
+    ElMessage.error('文档卸载失败: ' + error.message)
+  } finally {
+    file.loading = false
+  }
+}
+
+const isDocumentEmbedded = (doc) => {
+  // 检查多种可能的文档路径格式
+  const possiblePaths = [
+    `custom-documents/${doc.name}`,
+    doc.name,
+    doc.path,
+    doc.docpath
+  ].filter(Boolean)
+
+  // 检查文档是否已加载
+  const isEmbedded = possiblePaths.some(path => embeddedDocs.value.has(path))
+  console.log('Document embedded status:', {
+    doc: doc.name,
+    paths: possiblePaths,
+    embedded: isEmbedded,
+    allEmbedded: Array.from(embeddedDocs.value)
+  })
+  return isEmbedded
+}
+
+// 导出题库
 const exportQuestions = () => {
-  console.log('Exporting questions...')
-  // TODO: 实现导出逻辑
+  if (!questions.value || questions.value.length === 0) {
+    ElMessage.warning('没有可导出的题目')
+    return
+  }
+
+  try {
+    // 准备Excel数据
+    const excelData = questions.value.map((q, index) => {
+      const baseData = {
+        '序号': index + 1,
+        '题目类型': q.type,
+        '题目': q.question,
+        '正确答案': q.answer
+      }
+
+      // 根据题型添加不同的选项
+      if (q.type === '判断题') {
+        return {
+          ...baseData,
+          '选项A': '正确',
+          '选项B': '错误'
+        }
+      } else {
+        return {
+          ...baseData,
+          '选项A': q.options[0],
+          '选项B': q.options[1],
+          '选项C': q.options[2],
+          '选项D': q.options[3]
+        }
+      }
+    })
+
+    // 创建工作簿和工作表
+    const ws = xlsxUtils.json_to_sheet(excelData)
+    const wb = xlsxUtils.book_new()
+    xlsxUtils.book_append_sheet(wb, ws, '题库')
+
+    // 设置列宽
+    const colWidths = {
+      '序号': 6,
+      '题目类型': 10,
+      '题目': 50,
+      '选项A': 30,
+      '选项B': 30,
+      '选项C': 30,
+      '选项D': 30,
+      '正确答案': 15
+    }
+
+    ws['!cols'] = Object.values(colWidths).map(width => ({ wch: width }))
+
+    // 生成文件名
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+    const fileName = `题库_${timestamp}.xlsx`
+
+    // 导出文件
+    const wbout = xlsxWrite(wb, { bookType: 'xlsx', type: 'array' })
+    const blob = new Blob([wbout], { type: 'application/octet-stream' })
+    
+    // 创建下载链接并触发下载
+    const url = window.URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = fileName
+    document.body.appendChild(a)
+    a.click()
+    
+    // 清理
+    window.URL.revokeObjectURL(url)
+    document.body.removeChild(a)
+
+    ElMessage.success('题库导出成功')
+  } catch (error) {
+    console.error('导出题库失败:', error)
+    ElMessage.error('导出题库失败，请重试')
+  }
 }
 
 const generateQuestions = async () => {
@@ -589,26 +734,41 @@ const generateQuestions = async () => {
     generatingQuestions.value = true
     ElMessage.info('正在生成题目...')
     
+    // 获取当前题型的提示模板
+    const promptTemplate = questionPrompts[questionType.value]
+    if (!promptTemplate) {
+      throw new Error('未知的题目类型')
+    }
+
     // 构建提示语
-    const prompt = `请根据文档内容生成${questionCount.value}道${getQuestionTypeLabel(questionType.value)}。
-要求如下：
+    const prompt = `请根据文档内容生成${questionCount.value}道${promptTemplate.type}。
+
+基本要求：
 1. 题目内容必须来自已上传的文档
-2. 每道题目必须包含：题干、4个选项（A、B、C、D）和正确答案
-3. 选项内容要简洁明了，具有区分度
-4. 答案必须是 A、B、C、D 中的一个字母
+2. 题目难度要适中，避免过于简单或过于复杂
+3. 题目内容要准确，不能有歧义
+4. 必须直接返回JSON数组，不要包含任何其他文字说明
+
+${promptTemplate.format}
 
 返回格式要求：
-JSON数组，每个题目对象包含以下字段：
-- type: 题目类型（单选题/多选题/判断题）
-- question: 题干
-- options: 选项数组，包含4个选项
-- answer: 正确答案（A/B/C/D）
+- 必须是一个有效的 JSON 数组
+- 不要包含任何额外的解释或说明文字
+- 每个题目对象包含以下字段：
+  - type: 题目类型（${promptTemplate.type}）
+  - question: 题干
+  - options: 选项数组${questionType.value === 'judgment' ? '，固定为["正确", "错误"]' : '，包含4个选项'}
+  - answer: 正确答案${questionType.value === 'multiple' ? '（多个字母组合，如"ABC"）' : '（单个字母A/B/C/D）'}
 
-示例：[{
-  "type": "单选题",
+示例格式：
+[{
+  "type": "${promptTemplate.type}",
   "question": "题干内容",
-  "options": ["选项A内容", "选项B内容", "选项C内容", "选项D内容"],
-  "answer": "A"
+  ${questionType.value === 'judgment' 
+    ? '"options": ["正确", "错误"],'
+    : '"options": ["选项A内容", "选项B内容", "选项C内容", "选项D内容"],'
+  }
+  "answer": "${questionType.value === 'multiple' ? 'ABC' : 'A'}"
 }]`
 
     console.log('Generating questions with prompt:', prompt)
@@ -624,41 +784,73 @@ JSON数组，每个题目对象包含以下字段：
     // 解析返回的JSON字符串
     let generatedQuestions = []
     try {
-      // 查找返回文本中的JSON数组
-      const match = response.text.match(/\[.*\]/s)
-      if (match) {
-        generatedQuestions = JSON.parse(match[0])
+      let jsonText = ''
+      if (response.textResponse) {
+        // 尝试从返回文本中提取 JSON 数组
+        const matches = response.textResponse.match(/\[[\s\S]*\]/g)
+        if (matches && matches.length > 0) {
+          jsonText = matches[0]
+        } else {
+          throw new Error('返回内容中未找到有效的 JSON 数组')
+        }
+      } else if (response.text) {
+        const matches = response.text.match(/\[[\s\S]*\]/g)
+        if (matches && matches.length > 0) {
+          jsonText = matches[0]
+        } else {
+          throw new Error('返回内容中未找到有效的 JSON 数组')
+        }
       } else {
-        throw new Error('返回格式不正确')
+        throw new Error('未找到有效的返回数据')
       }
-    } catch (parseError) {
-      console.error('解析题目失败:', parseError)
-      ElMessage.error('生成的题目格式不正确，请重试')
-      return
+
+      // 尝试解析提取出的 JSON
+      try {
+        generatedQuestions = JSON.parse(jsonText)
+      } catch (parseError) {
+        console.error('JSON 解析错误:', parseError)
+        throw new Error('题目格式不正确，请重新生成')
+      }
+
+      // 验证生成的题目格式
+      generatedQuestions.forEach((q, index) => {
+        // 检查必要字段
+        if (!q.type || !q.question || !q.options || !q.answer) {
+          throw new Error(`第${index + 1}题格式不完整`)
+        }
+
+        // 判断题特殊处理
+        if (questionType.value === 'judgment') {
+          if (!Array.isArray(q.options) || q.options.length !== 2) {
+            q.options = ['正确', '错误']
+          }
+          if (!/^[AB]$/.test(q.answer)) {
+            throw new Error(`第${index + 1}题答案格式不正确`)
+          }
+        }
+        // 多选题答案格式验证
+        else if (questionType.value === 'multiple') {
+          if (!/^[A-D]+$/.test(q.answer) || q.answer.length < 2 || q.answer.length > 4) {
+            throw new Error(`第${index + 1}题答案格式不正确`)
+          }
+        }
+        // 单选题答案格式验证
+        else {
+          if (!/^[A-D]$/.test(q.answer)) {
+            throw new Error(`第${index + 1}题答案格式不正确`)
+          }
+        }
+      })
+
+      questions.value = generatedQuestions
+      ElMessage.success('题目生成成功')
+    } catch (error) {
+      console.error('解析生成的题目时出错:', error)
+      throw new Error('生成的题目格式不正确: ' + error.message)
     }
-
-    // 验证题目格式
-    const validQuestions = generatedQuestions.filter(q => {
-      return q.type && q.question && 
-             Array.isArray(q.options) && q.options.length === 4 &&
-             q.answer && /^[A-D]$/.test(q.answer)
-    })
-
-    if (validQuestions.length === 0) {
-      throw new Error('没有生成有效的题目')
-    }
-
-    // 更新题目列表
-    questions.value = validQuestions.map(q => ({
-      ...q,
-      profession: selectedProfession.value
-    }))
-    currentPage.value = 1
-    
-    ElMessage.success(`成功生成 ${validQuestions.length} 道题目`)
   } catch (error) {
-    console.error('Error generating questions:', error)
-    ElMessage.error('生成题目失败: ' + (error.message || '未知错误'))
+    console.error('生成题目失败:', error)
+    ElMessage.error(error.message || '生成题目失败，请重试')
   } finally {
     generatingQuestions.value = false
   }
@@ -747,40 +939,6 @@ const createWorkspace = async () => {
     ElMessage.error('创建工作区失败：' + (error.response?.data?.message || error.message))
   } finally {
     loading.value = false
-  }
-}
-
-// 文档加载状态管理
-const isDocumentEmbedded = (doc) => {
-  // 检查多种可能的文档路径格式
-  const possiblePaths = [
-    `custom-documents/${doc.name}`,
-    doc.name,
-    doc.path,
-    doc.docpath
-  ].filter(Boolean)
-
-  return possiblePaths.some(path => embeddedDocs.value.has(path))
-}
-
-// 文档卸载
-const unembedDocument = async (file) => {
-  if (!selectedWorkspace.value) {
-    ElMessage.error('请先选择工作区')
-    return
-  }
-
-  file.loading = true
-  try {
-    const docPath = `custom-documents/${file.name}`
-    await api.unembedDocument(selectedWorkspace.value, docPath)
-    await loadWorkspaceData() // 重新加载工作区数据以更新状态
-    ElMessage.success('文档卸载成功')
-  } catch (error) {
-    console.error('Error unembedding document:', error)
-    ElMessage.error('文档卸载失败: ' + error.message)
-  } finally {
-    file.loading = false
   }
 }
 

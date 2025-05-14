@@ -1,16 +1,33 @@
 import axios from 'axios';
 
-const API_BASE_URL = 'http://localhost:3002';  // 使用代理服务器端口
+const API_BASE_URL = process.env.NODE_ENV === 'development' 
+    ? 'http://localhost:3002'  // 开发环境
+    : 'http://127.0.0.1:3002'; // 生产环境
+
+// 根据题目数量计算超时时间（单位：毫秒）
+const calculateTimeout = (questionCount) => {
+    // 基础超时时间：10分钟
+    const baseTimeout = 10 * 60 * 1000
+    // 每个题目额外增加2分钟
+    const timePerQuestion = 2 * 60 * 1000
+    return baseTimeout + (questionCount * timePerQuestion)
+}
 
 // 创建带有拦截器的 axios 实例
 const axiosInstance = axios.create({
     baseURL: API_BASE_URL,
-    timeout: 300000,
+    timeout: 1800000,  // 默认30分钟
 });
 
 // 添加请求拦截器
 axiosInstance.interceptors.request.use(
     config => {
+        // 如果是生成题目的请求，动态设置超时时间
+        if (config.url === '/api/generate-questions' && config.data?.count) {
+            config.timeout = calculateTimeout(config.data.count)
+            console.log(`Set timeout to ${config.timeout}ms for generating ${config.data.count} questions`)
+        }
+        
         // 如果是 auth 相关的请求，添加 Authorization header
         if (config.url?.includes('/api/v1/auth')) {
             const apiKey = localStorage.getItem('apiKey')
@@ -400,16 +417,28 @@ const api = {
     // 工作区聊天
     workspaceChat: async (workspaceSlug, message, mode = 'chat') => {
         try {
-            console.log('Starting workspace chat:', { workspaceSlug, message, mode })
+            console.log('Starting workspace chat:', { workspaceSlug, message, mode });
             const response = await axiosInstance.post(`/api/v1/workspace/${workspaceSlug}/chat`, {
                 message,
                 mode
-            })
-            console.log('Chat response:', response.data)
-            return response.data
+            }, {
+                timeout: 600000  // 为生成题目特别设置10分钟超时
+            });
+            console.log('Chat response:', response.data);
+            return response.data;
         } catch (error) {
-            console.error('Error in workspace chat:', error.response?.data || error)
-            throw error
+            console.error('Error in workspace chat:', {
+                error: error.message,
+                response: error.response?.data,
+                config: error.config
+            });
+            
+            // 处理特定类型的错误
+            if (error.code === 'ECONNABORTED') {
+                throw new Error('生成题目超时，请稍后重试或减少文本内容');
+            }
+            
+            throw error;
         }
     },
 };
