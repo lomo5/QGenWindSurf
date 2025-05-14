@@ -666,6 +666,30 @@ app.get('/api/workspaces', async (req, res) => {
     }
 })
 
+// 添加工作区聊天路由
+app.post('/api/v1/workspace/:workspaceSlug/chat', async (req, res) => {
+    try {
+        const { workspaceSlug } = req.params
+        const { message, mode } = req.body
+        console.log('Workspace chat request:', { workspaceSlug, message, mode })
+
+        const apiClient = await getApiClient()
+        const response = await apiClient.post(`/api/v1/workspace/${workspaceSlug}/chat`, {
+            message,
+            mode
+        })
+
+        console.log('Chat response:', response.data)
+        res.json(response.data)
+    } catch (error) {
+        console.error('Error in workspace chat:', error.response?.data || error)
+        res.status(error.response?.status || 500).json({
+            error: error.message,
+            details: error.response?.data
+        })
+    }
+})
+
 const PORT = process.env.PORT || 3002
 
 // 确保服务器正确关闭

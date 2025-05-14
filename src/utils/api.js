@@ -5,7 +5,7 @@ const API_BASE_URL = 'http://localhost:3002';  // 使用代理服务器端口
 // 创建带有拦截器的 axios 实例
 const axiosInstance = axios.create({
     baseURL: API_BASE_URL,
-    timeout: 30000,
+    timeout: 300000,
 });
 
 // 添加请求拦截器
@@ -96,11 +96,16 @@ const api = {
     // 工作区相关方法
     getWorkspaces: async () => {
         try {
+            console.log('Fetching workspaces from server...')
             const response = await axiosInstance.get('/workspaces')
+            console.log('Server response:', response)
             return response.data
         } catch (error) {
             console.error('获取工作区列表失败:', error)
-            return [] // 返回空数组而不是抛出错误
+            if (error.response) {
+                console.error('Server error response:', error.response.data)
+            }
+            return []
         }
     },
 
@@ -180,7 +185,7 @@ const api = {
                 .split('\\')
                 .pop() // 获取文件名部分
                 .replace(/^.*[\\\/]/, '') // 移除任何剩余的路径分隔符
-            
+
             console.log('Binding document to workspace:', { 
                 workspace, 
                 documentPath,
@@ -375,14 +380,32 @@ const api = {
             throw error
         }
     },
-
+    // 从工作区移除文档
+    unembedDocument: async (workspaceSlug, documentPath) => {
+        try {
+            console.log(`Removing document ${documentPath} from workspace ${workspaceSlug}`)
+            
+            const response = await axiosInstance.post(`/api/v1/workspace/${workspaceSlug}/update-embeddings`, {
+                adds: [],
+                deletes: [documentPath]
+            })
+            
+            console.log('Document removal response:', response.data)
+            return response.data
+        } catch (error) {
+            console.error('Error removing document:', error.response?.data || error)
+            throw error
+        }
+    },
     // 工作区聊天
     workspaceChat: async (workspaceSlug, message, mode = 'chat') => {
         try {
+            console.log('Starting workspace chat:', { workspaceSlug, message, mode })
             const response = await axiosInstance.post(`/api/v1/workspace/${workspaceSlug}/chat`, {
                 message,
                 mode
             })
+            console.log('Chat response:', response.data)
             return response.data
         } catch (error) {
             console.error('Error in workspace chat:', error.response?.data || error)

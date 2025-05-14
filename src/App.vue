@@ -12,7 +12,6 @@
               <el-dropdown-menu>
                 <el-dropdown-item command="apikey">API Key设置</el-dropdown-item>
                 <el-dropdown-item command="prompt">Prompt设置</el-dropdown-item>
-                <el-dropdown-item command="model">模型选择</el-dropdown-item>
                 <el-dropdown-item command="workspace">工作区选择</el-dropdown-item>
               </el-dropdown-menu>
             </template>
@@ -170,12 +169,12 @@
               <el-table-column fixed="right" label="操作" width="100" align="center">
                 <template #default="scope">
                   <el-button
-                    type="primary"
+                    :type="isDocumentEmbedded(scope.row) ? 'warning' : 'primary'"
                     link
                     :loading="scope.row.loading"
-                    @click="embedDocument(scope.row)"
+                    @click="isDocumentEmbedded(scope.row) ? unembedDocument(scope.row) : embedDocument(scope.row)"
                   >
-                    加载
+                    {{ isDocumentEmbedded(scope.row) ? '卸载' : '加载' }}
                   </el-button>
                 </template>
               </el-table-column>
@@ -246,36 +245,57 @@
     </el-dialog>
 
     <!-- 工作区选择对话框 -->
-    <el-dialog v-model="workspaceDialogVisible" title="工作区选择" width="30%">
-      <el-select v-model="selectedWorkspace" placeholder="选择工作区" style="width: 100%">
-        <el-option
-          v-for="ws in workspaces"
-          :key="ws.slug"
-          :label="ws.name"
-          :value="ws.slug"
-        />
-      </el-select>
+    <el-dialog
+      v-model="workspaceDialogVisible"
+      title="选择工作区"
+      width="30%"
+      @open="openWorkspaceDialog"
+    >
+      <el-form>
+        <el-form-item label="工作区">
+          <el-select
+            v-model="selectedWorkspace"
+            placeholder="请选择工作区"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="workspace in workspaces"
+              :key="workspace.id || workspace.slug"
+              :label="workspace.name || workspace.slug || workspace.id"
+              :value="workspace.slug || workspace.id"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item>
+          <el-button type="primary" @click="openCreateWorkspaceDialog">
+            创建新工作区
+          </el-button>
+        </el-form-item>
+      </el-form>
       <template #footer>
         <span class="dialog-footer">
           <el-button @click="workspaceDialogVisible = false">取消</el-button>
-          <el-button type="primary" @click="createWorkspace">确定</el-button>
+          <el-button type="primary" @click="confirmWorkspace">
+            确认
+          </el-button>
         </span>
       </template>
     </el-dialog>
 
     <!-- 创建工作区对话框 -->
-    <el-dialog v-model="showWorkspaceDialog" title="创建新工作区" width="30%">
+    <el-dialog
+      v-model="createWorkspaceDialogVisible"
+      title="创建新工作区"
+      width="30%"
+    >
       <el-form>
-        <el-form-item label="工作区名称">
-          <el-input v-model="newWorkspaceName" placeholder="例如：高中数学" />
-        </el-form-item>
-        <el-form-item label="工作区标识">
-          <el-input v-model="newWorkspaceSlug" placeholder="例如：math-hs" />
+        <el-form-item label="工作区名称" required>
+          <el-input v-model="newWorkspaceName" placeholder="请输入工作区名称" />
         </el-form-item>
       </el-form>
       <template #footer>
         <span class="dialog-footer">
-          <el-button @click="showWorkspaceDialog = false">取消</el-button>
+          <el-button @click="createWorkspaceDialogVisible = false">取消</el-button>
           <el-button type="primary" @click="createWorkspace">
             创建
           </el-button>
@@ -304,23 +324,22 @@ const workspaceFiles = ref([])
 const loading = ref(false)
 const isLoading = ref(false)
 const generatingQuestions = ref(false)
-const currentWorkspace = ref(null)
 const selectedModel = ref('gpt-3.5-turbo')
 const questionType = ref('single')
-const showWorkspaceDialog = ref(false)
 const selectedProfession = ref(null)
 const fileList = ref([])
 const promptText = ref('')
 const newProfessionName = ref('')
 const newWorkspaceName = ref('')
-const newWorkspaceSlug = ref('')
 const workspaces = ref([])
-const selectedWorkspace = ref(null)
+const selectedWorkspace = ref('')
 const questions = ref([])
 const questionCount = ref(10)
 const uploadedFiles = ref([])
 const currentPage = ref(1)
 const pageSize = ref(10)
+const embeddedDocs = ref(new Set())
+const createWorkspaceDialogVisible = ref(false)
 
 // 选项数据
 const modelOptions = [
@@ -343,7 +362,7 @@ const handleCommand = (command) => {
   } else if (command === 'prompt') {
     promptDialogVisible.value = true
   } else if (command === 'workspace') {
-    workspaceDialogVisible.value = true
+    openWorkspaceDialog() // 调用新的方法
   }
 }
 
@@ -376,7 +395,7 @@ const addNewProfession = async () => {
 
 // 文件上传相关
 const handleUpload = async () => {
-  if (!currentWorkspace.value) {
+  if (!selectedWorkspace.value) {
     ElMessage.warning('请等待工作区初始化完成')
     return
   }
@@ -391,7 +410,7 @@ const handleUpload = async () => {
   try {
     loading.value = true
     ElMessage.info('正在上传文件...')
-    await api.uploadFile(file.raw, currentWorkspace.value.slug)
+    await api.uploadFile(file.raw, selectedWorkspace.value)
     ElMessage.success('文件上传成功')
     fileList.value = []
     await loadUploadedFiles()
@@ -450,55 +469,18 @@ const saveApiKey = async () => {
 }
 
 // 工作区相关
-const generateWorkspaceName = () => {
-  const date = new Date()
-  const year = date.getFullYear()
-  const month = String(date.getMonth() + 1).padStart(2, '0')
-  const day = String(date.getDate()).padStart(2, '0')
-  return `workspace-${year}${month}${day}`
-}
-
 const setupWorkspace = async () => {
-  loading.value = true
   try {
-    // 获取工作区列表
-    const workspaces = await api.getWorkspaces()
+    // 加载工作区列表
+    await loadWorkspaces()
     
-    if (workspaces && workspaces.length > 0) {
-      // 使用第一个工作区
-      currentWorkspace.value = workspaces[0]
-      console.log('Using existing workspace:', currentWorkspace.value)
-      return
-    }
-
-    // 如果没有工作区，创建新工作区
-    let retryCount = 0
-    const maxRetries = 3
-
-    while (retryCount < maxRetries) {
-      try {
-        const name = generateWorkspaceName()
-        console.log(`Creating new workspace (attempt ${retryCount + 1}):`, { name })
-        const workspace = await api.createWorkspace(name)
-        if (workspace) {
-          currentWorkspace.value = workspace
-          console.log('New workspace created:', workspace)
-          return
-        }
-      } catch (error) {
-        retryCount++
-        if (retryCount === maxRetries || error.response?.status !== 409) {
-          throw error
-        }
-        console.log(`Workspace creation failed (attempt ${retryCount}), retrying...`)
-        await new Promise(resolve => setTimeout(resolve, 1000)) // 等待一秒后重试
-      }
+    // 如果没有选择工作区，打开工作区选择对话框
+    if (!selectedWorkspace.value) {
+      workspaceDialogVisible.value = true
     }
   } catch (error) {
-    console.error('Workspace setup failed:', error)
-    ElMessage.error('工作区设置失败：' + (error.response?.data?.message || error.message))
-  } finally {
-    loading.value = false
+    console.error('Error setting up workspace:', error)
+    ElMessage.error('工作区初始化失败')
   }
 }
 
@@ -522,7 +504,7 @@ const loadUploadedFiles = async () => {
 }
 
 const deleteFile = async (file) => {
-  if (!currentWorkspace.value?.slug) {
+  if (!selectedWorkspace.value) {
     ElMessage.error('工作区未初始化')
     return
   }
@@ -532,7 +514,7 @@ const deleteFile = async (file) => {
       type: 'warning'
     })
     
-    await api.deleteWorkspaceFile(currentWorkspace.value.slug, file.id)
+    await api.deleteWorkspaceFile(selectedWorkspace.value, file.id)
     ElMessage.success('文件删除成功')
     await loadUploadedFiles()
   } catch (error) {
@@ -544,54 +526,46 @@ const deleteFile = async (file) => {
 }
 
 const embedDocument = async (file) => {
-  if (!currentWorkspace.value?.slug) {
-    ElMessage.error('请先选择工作区')
+  if (!selectedWorkspace.value) {
+    ElMessage.warning('请先选择工作区')
     return
   }
 
+  file.loading = true
   try {
-    loading.value = true
     console.log('Embedding file:', file)
-    
-    // 确保文件已上传
-    if (!file.id) {
-      throw new Error('文件ID不存在')
-    }
-
-    await api.embedDocument(currentWorkspace.value.slug, file.id)
-    ElMessage.success('文档嵌入成功')
-    
-    // 刷新工作区数据
-    await loadWorkspaceData()
-    // 刷新文件列表
-    await loadUploadedFiles()
+    await api.embedDocument(selectedWorkspace.value, file.id)
+    await loadWorkspaceData() // 重新加载工作区数据以更新状态
+    ElMessage.success('文档加载成功')
   } catch (error) {
-    console.error('Failed to embed document:', error)
-    ElMessage.error(
-      error.response?.data?.message || 
-      error.message || 
-      '文档嵌入失败，请检查控制台获取详细信息'
-    )
+    console.error('Error embedding document:', error)
+    ElMessage.error('文档加载失败: ' + error.message)
   } finally {
-    loading.value = false
+    file.loading = false
   }
 }
 
 const loadWorkspaceData = async () => {
-  if (!currentWorkspace.value?.slug) return
+  if (!selectedWorkspace.value) return
   
   try {
-    const response = await api.getWorkspaceData(currentWorkspace.value.slug)
-    console.log('Workspace data:', response)
-    // 更新工作区信息
-    if (response?.workspace) {
-      currentWorkspace.value = {
-        ...currentWorkspace.value,
-        ...response.workspace
-      }
+    const workspace = await api.getWorkspaceData(selectedWorkspace.value)
+    console.log('Workspace data:', workspace)
+    
+    // 更新已嵌入文档集合
+    if (workspace.documents) {
+      embeddedDocs.value.clear()
+      workspace.documents.forEach(doc => {
+        const docPath = doc.docpath || doc.path
+        if (docPath) {
+          embeddedDocs.value.add(docPath)
+        }
+      })
+      console.log('Updated embedded docs:', Array.from(embeddedDocs.value))
     }
   } catch (error) {
-    console.error('Failed to load workspace data:', error)
+    console.error('Error loading workspace data:', error)
+    throw error // 向上传播错误，让调用者处理
   }
 }
 
@@ -601,13 +575,19 @@ const exportQuestions = () => {
 }
 
 const generateQuestions = async () => {
-  if (!currentWorkspace.value?.slug) {
+  if (!selectedWorkspace.value) {
     ElMessage.error('请先选择工作区')
+    return
+  }
+
+  if (!selectedProfession.value) {
+    ElMessage.warning('请先选择专业')
     return
   }
 
   try {
     generatingQuestions.value = true
+    ElMessage.info('正在生成题目...')
     
     // 构建提示语
     const prompt = `请根据文档内容生成${questionCount.value}道${getQuestionTypeLabel(questionType.value)}。
@@ -631,17 +611,21 @@ JSON数组，每个题目对象包含以下字段：
   "answer": "A"
 }]`
 
+    console.log('Generating questions with prompt:', prompt)
+
     const response = await api.workspaceChat(
-      currentWorkspace.value.slug,
+      selectedWorkspace.value,
       prompt,
       'chat'
     )
+
+    console.log('Generated response:', response)
 
     // 解析返回的JSON字符串
     let generatedQuestions = []
     try {
       // 查找返回文本中的JSON数组
-      const match = response.content.match(/\[.*\]/s)
+      const match = response.text.match(/\[.*\]/s)
       if (match) {
         generatedQuestions = JSON.parse(match[0])
       } else {
@@ -665,13 +649,16 @@ JSON数组，每个题目对象包含以下字段：
     }
 
     // 更新题目列表
-    questions.value = validQuestions
+    questions.value = validQuestions.map(q => ({
+      ...q,
+      profession: selectedProfession.value
+    }))
     currentPage.value = 1
     
     ElMessage.success(`成功生成 ${validQuestions.length} 道题目`)
   } catch (error) {
-    console.error('生成题目失败:', error)
-    ElMessage.error(error.message || '生成题目失败，请重试')
+    console.error('Error generating questions:', error)
+    ElMessage.error('生成题目失败: ' + (error.message || '未知错误'))
   } finally {
     generatingQuestions.value = false
   }
@@ -749,10 +736,9 @@ const createWorkspace = async () => {
     loading.value = true
     const workspace = await api.createWorkspace(newWorkspaceName.value)
     if (workspace) {
-      currentWorkspace.value = workspace
+      selectedWorkspace.value = workspace.slug
       ElMessage.success('工作区创建成功')
-      workspaceDialogVisible.value = false
-      showWorkspaceDialog.value = false
+      createWorkspaceDialogVisible.value = false
       // 重新加载工作区数据
       await loadWorkspaceData()
     }
@@ -761,6 +747,40 @@ const createWorkspace = async () => {
     ElMessage.error('创建工作区失败：' + (error.response?.data?.message || error.message))
   } finally {
     loading.value = false
+  }
+}
+
+// 文档加载状态管理
+const isDocumentEmbedded = (doc) => {
+  // 检查多种可能的文档路径格式
+  const possiblePaths = [
+    `custom-documents/${doc.name}`,
+    doc.name,
+    doc.path,
+    doc.docpath
+  ].filter(Boolean)
+
+  return possiblePaths.some(path => embeddedDocs.value.has(path))
+}
+
+// 文档卸载
+const unembedDocument = async (file) => {
+  if (!selectedWorkspace.value) {
+    ElMessage.error('请先选择工作区')
+    return
+  }
+
+  file.loading = true
+  try {
+    const docPath = `custom-documents/${file.name}`
+    await api.unembedDocument(selectedWorkspace.value, docPath)
+    await loadWorkspaceData() // 重新加载工作区数据以更新状态
+    ElMessage.success('文档卸载成功')
+  } catch (error) {
+    console.error('Error unembedding document:', error)
+    ElMessage.error('文档卸载失败: ' + error.message)
+  } finally {
+    file.loading = false
   }
 }
 
@@ -775,13 +795,12 @@ onMounted(async () => {
       return
     }
 
-    // 初始化其他组件
-    await Promise.all([
-      setupWorkspace(),
-      loadProfessions()
-    ])
-    
+    // 加载已上传的文件列表
     await loadUploadedFiles()
+    // 加载专业列表
+    await loadProfessions()
+    // 加载工作区列表
+    await setupWorkspace()
   } catch (error) {
     console.error('系统初始化失败:', error)
     ElMessage.error('系统初始化失败')
@@ -789,6 +808,75 @@ onMounted(async () => {
     loading.value = false
   }
 })
+
+// 加载工作区列表
+const loadWorkspaces = async () => {
+  try {
+    console.log('开始加载工作区列表...')
+    const response = await api.getWorkspaces()
+    console.log('工作区列表原始数据:', response)
+    
+    // 确保返回的数据是数组格式
+    if (response && Array.isArray(response)) {
+      workspaces.value = response
+    } else if (response && typeof response === 'object') {
+      // 如果返回的是对象，尝试提取数组
+      const workspaceArray = response.workspaces || response.data || []
+      workspaces.value = Array.isArray(workspaceArray) ? workspaceArray : []
+    } else {
+      workspaces.value = []
+    }
+    
+    console.log('处理后的工作区列表:', workspaces.value)
+  } catch (error) {
+    console.error('加载工作区列表失败:', error)
+    ElMessage.error('加载工作区列表失败')
+    workspaces.value = []
+  }
+}
+
+// 确认工作区选择
+const confirmWorkspace = async () => {
+  if (!selectedWorkspace.value) {
+    ElMessage.warning('请选择一个工作区')
+    return
+  }
+  
+  try {
+    loading.value = true
+    workspaceDialogVisible.value = false
+    await loadWorkspaceData()
+    ElMessage.success('工作区加载成功')
+  } catch (error) {
+    console.error('Error loading workspace:', error)
+    ElMessage.error('工作区加载失败')
+    // 如果加载失败，重新打开工作区选择对话框
+    workspaceDialogVisible.value = true
+  } finally {
+    loading.value = false
+  }
+}
+
+// 打开工作区对话框
+const openWorkspaceDialog = async () => {
+  try {
+    await loadWorkspaces() // 重新加载工作区列表
+    workspaceDialogVisible.value = true
+  } catch (error) {
+    console.error('Error opening workspace dialog:', error)
+    ElMessage.error('打开工作区对话框失败')
+  }
+}
+
+// 打开创建工作区对话框
+const openCreateWorkspaceDialog = () => {
+  // 关闭工作区选择对话框
+  workspaceDialogVisible.value = false
+  // 清空新工作区的输入
+  newWorkspaceName.value = ''
+  // 打开创建工作区对话框
+  createWorkspaceDialogVisible.value = true
+}
 </script>
 
 <style scoped>
